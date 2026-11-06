@@ -647,7 +647,7 @@ void ApplyMaterial() {
 
     // 用 DWM 自己的圆角：Acrylic 是 DWM 在窗口矩形上画的，D2D 的圆角裁剪管不到它，
     // 只有把窗口本身裁成圆角，毛玻璃的四角才不会是直角（DWM 圆角带抗锯齿）。
-    DWORD corner = 1;  // DWMWCP_ROUND
+    DWORD corner = 2;  // DWMWCP_ROUND
     DwmSetWindowAttribute(g.hwnd, 33, &corner, sizeof(corner));
     DWORD borderNone = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
     DwmSetWindowAttribute(g.hwnd, 34 /* DWMWA_BORDER_COLOR */, &borderNone, sizeof(borderNone));
@@ -2854,7 +2854,7 @@ bool StepAnimation() {
     }
 
     // 完全收起（已滑出屏幕）→ 直接隐藏窗口，桌面上不留任何痕迹
-    if (g.autoHidden && g.slide >= 0.999f && g.opacity <= 0.02f && g.winShown) {
+        if (g.autoHidden && (g.slide >= 0.999f || (g.opacity <= 0.02f && s.material != 0)) && g.winShown) {
         g.winShown = false;
         ShowWindow(g.hwnd, SW_HIDE);
         HideLabel();
