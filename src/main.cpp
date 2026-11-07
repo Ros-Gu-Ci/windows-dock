@@ -90,6 +90,7 @@ constexpr UINT_PTR kSystemTrayTimerId = 6;
 constexpr UINT_PTR kRevealTimerId = 7;
 constexpr UINT_PTR kGroupWatchTimerId = 8;
 constexpr UINT_PTR kGroupAnimTimerId = 9;          // 文件夹面板入场/退场动画
+constexpr UINT_PTR kPopupAnimTimerId = 10;         // 九宫格面板入场/退场动画
 constexpr UINT kAnimIntervalMs = 15;
 constexpr UINT kTrayMsg = WM_APP + 10;
 constexpr UINT kFullscreenCheckMsg = WM_APP + 11;
@@ -363,6 +364,7 @@ struct GroupAnimState {
     float t = 0.0f;
 };
 GroupAnimState gGroupAnim;
+GroupAnimState gPopupAnim;      // 九宫格面板复用同一套状态结构
 
 struct PopupState {
     HWND hwnd = nullptr;
@@ -372,6 +374,7 @@ struct PopupState {
     UINT h = 0;
     ComPtr<IDCompositionTarget> target;
     ComPtr<IDCompositionVisual> visual;
+    ComPtr<IDCompositionEffectGroup> opacityFx;   // 九宫格面板的透明度效果组
     ComPtr<IDXGISwapChain1> swap;
     ComPtr<ID2D1Bitmap1> bitmap;
     ComPtr<IDWriteTextFormat> title;
@@ -581,6 +584,9 @@ void HideLabel();
 void LaunchItem(int index);
 LRESULT CALLBACK GroupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void HideGroup();
+void StartPopupAnim(bool closing);
+void StepPopupAnim();
+void FinishHidePopup();
 bool IsDockItemGroup(int index);
 void OpenGroupAtItem(int index);
 void RenderGroup();
@@ -1813,6 +1819,8 @@ std::wstring PopupStateText(int index) {
 }
 
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // 退场动画期间面板逻辑上已关闭：屏蔽鼠标，避免点到正在淡出的窗口
+    if (!gPopup.shown && msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) return 0;
     switch (msg) {
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -2042,6 +2050,7 @@ void RefreshPopupIfShown() {
 
 void HidePopup() {
     if (!gPopup.shown && !gPopup.hwnd) return;
+    if (gPopupAnim.running && gPopupAnim.closing) return;   // 已经在退场
     gPopup.shown = false;
     gPopup.hover = -1;
     gPopup.prevMouseDown = false;
@@ -2049,6 +2058,12 @@ void HidePopup() {
     if (gPopup.watchOn) {
         gPopup.watchOn = false;
         KillTimer(g.hwnd, kPopupWatchTimerId);
+    }
+    // 平滑退场：先跑动画，跑完在 FinishHidePopup() 里才真正隐藏窗口
+    if (gPopup.hwnd && gPopup.visual) {
+        StartPopupAnim(true);
+        Dbg(L"popup closing");
+        return;
     }
     if (gPopup.hwnd) ShowWindow(gPopup.hwnd, SW_HIDE);
     Dbg(L"popup hidden");
@@ -2321,15 +2336,16 @@ void PositionGroup() {
 }
 
 // ------------------------------------------------------- 面板过渡动画 ---
+// 文件夹二级栏 与 九宫格设置面板 共用同一套动画：
 // 只动 DComp 视觉对象的透明度和缩放，内容不重绘，每帧开销接近零。
 // 打开：透明度 0→1、缩放 0.96→1；关闭：反向，动画跑完才真正 SW_HIDE。
-constexpr float kGroupAnimOpenMs  = 140.0f;
-constexpr float kGroupAnimCloseMs = 110.0f;
+constexpr float kPanelAnimOpenMs  = 140.0f;
+constexpr float kPanelAnimCloseMs = 110.0f;
 
 // 锚点取"靠近 Dock 的那一侧"，视觉上像从 Dock 长出来
-D2D1_POINT_2F GroupAnimAnchor() {
-    const float w = static_cast<float>(gGroup.w);
-    const float h = static_cast<float>(gGroup.h);
+D2D1_POINT_2F PanelAnimAnchor(UINT wPx, UINT hPx) {
+    const float w = static_cast<float>(wPx);
+    const float h = static_cast<float>(hPx);
     switch (s.edge) {
     case 1:  return D2D1::Point2F(w * 0.5f, 0.0f);   // Dock 在顶部 → 锚上沿
     case 0:  return D2D1::Point2F(w * 0.5f, h);      // Dock 在底部 → 锚下沿
@@ -2349,36 +2365,39 @@ static auto SetVisualMatrix(TV* v, const TM& m, long) -> decltype(v->SetTransfor
     v->SetTransform(&m);
 }
 
-// DComp 里透明度不是视觉对象的直接成员（IDCompositionVisual 没有 SetOpacity）：
-// 要通过效果组 IDCompositionEffectGroup::SetOpacity 挂到视觉对象上。
-void SetGroupVisualOpacity(float op) {
-    if (!gGroup.visual || !g.compDevice) return;
-    if (!gGroup.opacityFx) {
-        if (FAILED(g.compDevice->CreateEffectGroup(&gGroup.opacityFx)) || !gGroup.opacityFx) return;
-        gGroup.visual->SetEffect(gGroup.opacityFx.Get());
+// 通用：把「透明度 k + 缩放 0.96+0.04k」套到某个面板视觉对象上。
+// DComp 的透明度必须走效果组（IDCompositionVisual 本身没有 SetOpacity）。
+void ApplyPanelVisual(IDCompositionVisual* vis, ComPtr<IDCompositionEffectGroup>& fx,
+                      float k, D2D1_POINT_2F anchor) {
+    if (!vis) return;
+    if (g.compDevice) {
+        if (!fx) {
+            if (SUCCEEDED(g.compDevice->CreateEffectGroup(&fx)) && fx) vis->SetEffect(fx.Get());
+        }
+        if (fx) fx->SetOpacity(k);
     }
-    gGroup.opacityFx->SetOpacity(op);
+    const float scale = 0.96f + 0.04f * k;
+    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, anchor);
+    SetVisualMatrix(vis, m, 0);
+    if (g.compDevice) g.compDevice->Commit();
 }
 
+// 进度 → 视觉权重（ease-out-cubic；关闭时从 1 退回 0）
+float PanelEaseT(const GroupAnimState& a) {
+    const float inv = 1.0f - a.t;
+    const float e = 1.0f - inv * inv * inv;
+    return a.closing ? (1.0f - e) : e;
+}
+
+// ---------------- 文件夹二级栏 ----------------
 void ApplyGroupAnim() {
-    if (!gGroup.visual) return;
-    const float t = gGroupAnim.t;
-    const float inv = 1.0f - t;
-    const float e = 1.0f - inv * inv * inv;                    // ease-out-cubic
-    const float k = gGroupAnim.closing ? (1.0f - e) : e;       // 关闭时 1 → 0
-    const float scale = 0.96f + 0.04f * k;
-    SetGroupVisualOpacity(k);
-    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, GroupAnimAnchor());
-    SetVisualMatrix(gGroup.visual.Get(), m, 0);
-    if (g.compDevice) g.compDevice->Commit();
+    ApplyPanelVisual(gGroup.visual.Get(), gGroup.opacityFx, PanelEaseT(gGroupAnim),
+                     PanelAnimAnchor(gGroup.w, gGroup.h));
 }
 
 void ResetGroupVisual() {
-    if (!gGroup.visual) return;
-    SetGroupVisualOpacity(1.0f);
-    const D2D1_MATRIX_3X2_F id = D2D1::Matrix3x2F::Identity();
-    SetVisualMatrix(gGroup.visual.Get(), id, 0);
-    if (g.compDevice) g.compDevice->Commit();
+    ApplyPanelVisual(gGroup.visual.Get(), gGroup.opacityFx, 1.0f,
+                     PanelAnimAnchor(gGroup.w, gGroup.h));
 }
 
 void StopGroupAnimTimer() {
@@ -2409,7 +2428,7 @@ void FinishHideGroup() {
 
 void StepGroupAnim() {
     if (!gGroupAnim.running) return;
-    const float ms = gGroupAnim.closing ? kGroupAnimCloseMs : kGroupAnimOpenMs;
+    const float ms = gGroupAnim.closing ? kPanelAnimCloseMs : kPanelAnimOpenMs;
     gGroupAnim.t += static_cast<float>(kAnimIntervalMs) / ms;
     if (gGroupAnim.t >= 1.0f) {
         gGroupAnim.t = 1.0f;
@@ -2432,6 +2451,56 @@ void CancelGroupCloseAnim() {
     gGroupAnim.closing = false;
     StopGroupAnimTimer();
     ResetGroupVisual();
+}
+
+// ---------------- 九宫格设置面板 ----------------
+void ApplyPopupAnim() {
+    ApplyPanelVisual(gPopup.visual.Get(), gPopup.opacityFx, PanelEaseT(gPopupAnim),
+                     PanelAnimAnchor(gPopup.w, gPopup.h));
+}
+
+void StopPopupAnimTimer() {
+    if (!gPopupAnim.timerOn) return;
+    gPopupAnim.timerOn = false;
+    KillTimer(g.hwnd, kPopupAnimTimerId);
+}
+
+void StartPopupAnim(bool closing) {
+    if (!gPopup.visual) return;
+    gPopupAnim.closing = closing;
+    gPopupAnim.running = true;
+    gPopupAnim.t = 0.0f;
+    ApplyPopupAnim();
+    if (!gPopupAnim.timerOn) {
+        gPopupAnim.timerOn = true;
+        SetTimer(g.hwnd, kPopupAnimTimerId, kAnimIntervalMs, nullptr);
+    }
+}
+
+void FinishHidePopup() {
+    StopPopupAnimTimer();
+    gPopupAnim.running = false;
+    if (gPopup.hwnd) ShowWindow(gPopup.hwnd, SW_HIDE);
+    ApplyPanelVisual(gPopup.visual.Get(), gPopup.opacityFx, 1.0f,
+                     PanelAnimAnchor(gPopup.w, gPopup.h));
+}
+
+void StepPopupAnim() {
+    if (!gPopupAnim.running) return;
+    const float ms = gPopupAnim.closing ? kPanelAnimCloseMs : kPanelAnimOpenMs;
+    gPopupAnim.t += static_cast<float>(kAnimIntervalMs) / ms;
+    if (gPopupAnim.t >= 1.0f) {
+        gPopupAnim.t = 1.0f;
+        ApplyPopupAnim();
+        gPopupAnim.running = false;
+        if (gPopupAnim.closing) {
+            FinishHidePopup();
+        } else {
+            StopPopupAnimTimer();
+        }
+        return;
+    }
+    ApplyPopupAnim();
 }
 
 LRESULT CALLBACK GroupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -2502,36 +2571,16 @@ void RenderGroup() {
     const float r = 18.0f * g.dpiScale;
     const D2D1_ROUNDED_RECT panel{ D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r, r };
 
-    // 二级栏跟随主 Dock 的外观，避免"主栏浅白毛玻璃、弹出层却是深色块"
+    // 层次 1：背景直接复用主 Dock 的 PanelStyle()，不再维护第二张颜色表。
+    // 这样换主题时两处必然一致。注意面板本身没有 DWM 模糊底衬，所以
+    // material=0 的「白 20%」在这里会显得很透；material=1（透明模式）则是完全没有底板。
     D2D1_COLOR_F fill{}, line{};
-    float ink = 1.0f;
-    switch (s.material) {
-    case 0:
-        // 面板是普通分层窗口，没有 DWM 模糊可用，所以用较高不透明度的浅白，
-        // 视觉上与主栏的浅白毛玻璃保持一致，又不会糊成一片。
-        fill = D2D1::ColorF(0.96f, 0.97f, 0.99f, 0.88f);
-        line = D2D1::ColorF(0, 0, 0, 0.06f);
-        ink = 0.15f;
-        break;
-    case 1:
-        fill = D2D1::ColorF(0.08f, 0.09f, 0.13f, 0.55f);
-        line = D2D1::ColorF(1, 1, 1, 0.10f);
-        ink = 1.0f;
-        break;
-    case 2:
-        fill = D2D1::ColorF(0.045f, 0.050f, 0.065f, 0.95f);
-        line = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
-        ink = 1.0f;
-        break;
-    default:
-        fill = D2D1::ColorF(0.93f, 0.94f, 0.96f, 0.96f);
-        line = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
-        ink = 0.15f;
-        break;
+    PanelStyle(&fill, &line);
+    const float ink = InkW();
+    if (fill.a > 0.002f) {
+        g.brush->SetColor(fill);
+        g.dc->FillRoundedRectangle(panel, g.brush.Get());
     }
-
-    g.brush->SetColor(fill);
-    g.dc->FillRoundedRectangle(panel, g.brush.Get());
     if (line.a > 0.0f) {
         g.brush->SetColor(line);
         g.dc->DrawRoundedRectangle(panel, g.brush.Get(), 1.0f);
@@ -2920,6 +2969,7 @@ void TogglePopup() {
     gPopup.prevMouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     gPopup.prevEscapeDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     RenderPopup();
+    StartPopupAnim(false);          // 先把透明度设成 0 再显示，避免首帧闪烁
     ShowWindow(gPopup.hwnd, SW_SHOWNOACTIVATE);
     StartPopupWatch();
     Dbg(L"popup shown at edge=%d", s.edge);
@@ -4542,6 +4592,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             gPopup.prevMouseDown = down;
             gPopup.prevEscapeDown = esc;
+            return 0;
+        }
+        if (wp == kPopupAnimTimerId) {
+            StepPopupAnim();
             return 0;
         }
         if (wp == kGroupAnimTimerId) {
