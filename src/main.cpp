@@ -345,6 +345,7 @@ struct GroupState {
     bool prevEscapeDown = false;
     ComPtr<IDCompositionTarget> target;
     ComPtr<IDCompositionVisual> visual;
+    ComPtr<IDCompositionEffectGroup> opacityFx;   // DComp 的透明度要通过效果组设置
     ComPtr<IDXGISwapChain1> swap;
     ComPtr<ID2D1Bitmap1> bitmap;
     ComPtr<IDWriteTextFormat> titleFmt;
@@ -2348,6 +2349,17 @@ static auto SetVisualMatrix(TV* v, const TM& m, long) -> decltype(v->SetTransfor
     v->SetTransform(&m);
 }
 
+// DComp 里透明度不是视觉对象的直接成员（IDCompositionVisual 没有 SetOpacity）：
+// 要通过效果组 IDCompositionEffectGroup::SetOpacity 挂到视觉对象上。
+void SetGroupVisualOpacity(float op) {
+    if (!gGroup.visual || !g.compDevice) return;
+    if (!gGroup.opacityFx) {
+        if (FAILED(g.compDevice->CreateEffectGroup(&gGroup.opacityFx)) || !gGroup.opacityFx) return;
+        gGroup.visual->SetEffect(gGroup.opacityFx.Get());
+    }
+    gGroup.opacityFx->SetOpacity(op);
+}
+
 void ApplyGroupAnim() {
     if (!gGroup.visual) return;
     const float t = gGroupAnim.t;
@@ -2355,7 +2367,7 @@ void ApplyGroupAnim() {
     const float e = 1.0f - inv * inv * inv;                    // ease-out-cubic
     const float k = gGroupAnim.closing ? (1.0f - e) : e;       // 关闭时 1 → 0
     const float scale = 0.96f + 0.04f * k;
-    gGroup.visual->SetOpacity(k);
+    SetGroupVisualOpacity(k);
     const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, GroupAnimAnchor());
     SetVisualMatrix(gGroup.visual.Get(), m, 0);
     if (g.compDevice) g.compDevice->Commit();
@@ -2363,7 +2375,7 @@ void ApplyGroupAnim() {
 
 void ResetGroupVisual() {
     if (!gGroup.visual) return;
-    gGroup.visual->SetOpacity(1.0f);
+    SetGroupVisualOpacity(1.0f);
     const D2D1_MATRIX_3X2_F id = D2D1::Matrix3x2F::Identity();
     SetVisualMatrix(gGroup.visual.Get(), id, 0);
     if (g.compDevice) g.compDevice->Commit();
