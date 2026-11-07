@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -693,6 +694,92 @@ void ApplyMaterial() {
 }
 // ------------------------------------------------------------------- icons ---
 
+// 图标归一化 ---------------------------------------------------------------
+// 有些 .lnk（典型是图标资源里没有大尺寸帧的应用）在向系统要"大图"时，系统不放大，
+// 而是把原生小图居中贴进请求的画布，四周留空，外圈还带 1px 白边。
+// 直接画进图标框就会"图标小一圈 + 一圈白框"。
+// 这里按内容包围盒裁掉空白与白边，再等比放大铺满方形画布；判定条件严格（内容占画布
+// 不足 85% 才处理），像 Steam / Edge 那种本来就铺满的图标完全不受影响。
+// 失败时返回空，调用方继续用原图，行为与改动前一致。
+ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
+    if (!src || !g.wic || px == 0) return nullptr;
+
+    UINT sw = 0, sh = 0;
+    if (FAILED(src->GetSize(&sw, &sh)) || sw == 0 || sh == 0) return nullptr;
+
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(g.wic->CreateFormatConverter(&conv))) return nullptr;
+    if (FAILED(conv->Initialize(src, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                                nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+        return nullptr;
+
+    const UINT stride = sw * 4;
+    std::vector<BYTE> buf(static_cast<size_t>(stride) * sh);
+    if (FAILED(conv->CopyPixels(nullptr, stride, static_cast<UINT>(buf.size()), buf.data())))
+        return nullptr;
+
+    // 内容包围盒：跳过全透明像素（空白）和近白像素（系统加的白边）
+    int minX = static_cast<int>(sw), minY = static_cast<int>(sh), maxX = -1, maxY = -1;
+    for (UINT y = 0; y < sh; ++y) {
+        const BYTE* row = buf.data() + static_cast<size_t>(y) * stride;
+        for (UINT x = 0; x < sw; ++x) {
+            const BYTE* p = row + x * 4;                  // BGRA（预乘）
+            const bool opaque = p[3] > 16;
+            const bool white = p[0] > 240 && p[1] > 240 && p[2] > 240;
+            if (!opaque || white) continue;
+            if (static_cast<int>(x) < minX) minX = static_cast<int>(x);
+            if (static_cast<int>(x) > maxX) maxX = static_cast<int>(x);
+            if (static_cast<int>(y) < minY) minY = static_cast<int>(y);
+            if (static_cast<int>(y) > maxY) maxY = static_cast<int>(y);
+        }
+    }
+    if (maxX < minX || maxY < minY) return nullptr;       // 纯白/无内容图标，保持原样
+
+    const UINT cw = static_cast<UINT>(maxX - minX + 1);
+    const UINT chh = static_cast<UINT>(maxY - minY + 1);
+    if (cw * 100 >= sw * 85 && chh * 100 >= sh * 85) return nullptr;  // 本来够满，不动
+
+    ComPtr<IWICBitmap> cropped;
+    if (FAILED(g.wic->CreateBitmapFromSourceRect(conv.Get(), static_cast<UINT>(minX),
+                                                 static_cast<UINT>(minY), cw, chh, &cropped)))
+        return nullptr;
+
+    const double scale = static_cast<double>(px) / static_cast<double>(cw > chh ? cw : chh);
+    const UINT nw = static_cast<UINT>(std::max<long>(1, std::lround(cw * scale)));
+    const UINT nh = static_cast<UINT>(std::max<long>(1, std::lround(chh * scale)));
+
+    ComPtr<IWICBitmapScaler> scaler;
+    if (FAILED(g.wic->CreateBitmapScaler(&scaler))) return nullptr;
+    if (FAILED(scaler->Initialize(cropped.Get(), nw, nh, WICBitmapInterpolationModeHighQualityCubic)))
+        return nullptr;
+
+    std::vector<BYTE> small(static_cast<size_t>(nw) * 4 * nh);
+    if (FAILED(scaler->CopyPixels(nullptr, nw * 4, static_cast<UINT>(small.size()), small.data())))
+        return nullptr;
+
+    ComPtr<IWICBitmap> square;
+    if (FAILED(g.wic->CreateBitmap(px, px, GUID_WICPixelFormat32bppPBGRA,
+                                   WICBitmapCacheOnDemand, &square)))
+        return nullptr;
+
+    WICRect all{ 0, 0, static_cast<INT>(px), static_cast<INT>(px) };
+    ComPtr<IWICBitmapLock> lock;
+    if (FAILED(square->Lock(&all, WICBitmapLockWrite, &lock))) return nullptr;
+    UINT dstStride = 0, dstSize = 0;
+    BYTE* dst = nullptr;
+    if (FAILED(lock->GetStride(&dstStride))) return nullptr;
+    if (FAILED(lock->GetDataPointer(&dstSize, &dst))) return nullptr;
+    memset(dst, 0, dstSize);                              // 透明底
+
+    const UINT ox = (px - nw) / 2, oy = (px - nh) / 2;    // 居中放置
+    for (UINT y = 0; y < nh; ++y) {
+        memcpy(dst + static_cast<size_t>(y + oy) * dstStride + ox * 4,
+               small.data() + static_cast<size_t>(y) * nw * 4, nw * 4);
+    }
+    lock.Reset();
+    return square;
+}
+
 
 ComPtr<IWICBitmap> LoadIconWic(const std::wstring& path, UINT px) {
     if (!g.wic) return nullptr;
@@ -720,6 +807,12 @@ ComPtr<IWICBitmap> LoadIconWic(const std::wstring& path, UINT px) {
     if (FAILED(hr)) {
         Dbg(L"wic hr=0x%08X %s", hr, path.c_str());
         return nullptr;
+    }
+
+    // 归一化：把"居中小图 + 白边"的图标裁到内容包围盒再铺满；本来就满的图标原样返回
+    if (ComPtr<IWICBitmap> normalized = NormalizeIconWic(wicBitmap.Get(), px)) {
+        Dbg(L"icon normalized: %s", path.c_str());
+        return normalized;
     }
     return wicBitmap;
 }
