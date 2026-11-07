@@ -745,16 +745,20 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
         return nullptr;
 
     const double scale = static_cast<double>(px) / static_cast<double>(cw > chh ? cw : chh);
-    const UINT nw = static_cast<UINT>(std::max<long>(1, std::lround(cw * scale)));
-    const UINT nh = static_cast<UINT>(std::max<long>(1, std::lround(chh * scale)));
+    long nwL = std::lround(cw * scale);
+    long nhL = std::lround(chh * scale);
+    if (nwL < 1) nwL = 1;
+    if (nhL < 1) nhL = 1;
+    const UINT nw = static_cast<UINT>(nwL);
+    const UINT nh = static_cast<UINT>(nhL);
 
     ComPtr<IWICBitmapScaler> scaler;
     if (FAILED(g.wic->CreateBitmapScaler(&scaler))) return nullptr;
     if (FAILED(scaler->Initialize(cropped.Get(), nw, nh, WICBitmapInterpolationModeHighQualityCubic)))
         return nullptr;
 
-    std::vector<BYTE> small(static_cast<size_t>(nw) * 4 * nh);
-    if (FAILED(scaler->CopyPixels(nullptr, nw * 4, static_cast<UINT>(small.size()), small.data())))
+    std::vector<BYTE> scaledBuf(static_cast<size_t>(nw) * 4 * nh);
+    if (FAILED(scaler->CopyPixels(nullptr, nw * 4, static_cast<UINT>(scaledBuf.size()), scaledBuf.data())))
         return nullptr;
 
     ComPtr<IWICBitmap> square;
@@ -774,7 +778,7 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
     const UINT ox = (px - nw) / 2, oy = (px - nh) / 2;    // 居中放置
     for (UINT y = 0; y < nh; ++y) {
         memcpy(dst + static_cast<size_t>(y + oy) * dstStride + ox * 4,
-               small.data() + static_cast<size_t>(y) * nw * 4, nw * 4);
+               scaledBuf.data() + static_cast<size_t>(y) * nw * 4, nw * 4);
     }
     lock.Reset();
     return square;
