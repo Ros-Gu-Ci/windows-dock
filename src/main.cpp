@@ -89,6 +89,7 @@ constexpr UINT_PTR kPopupWatchTimerId = 5;
 constexpr UINT_PTR kSystemTrayTimerId = 6;
 constexpr UINT_PTR kRevealTimerId = 7;
 constexpr UINT_PTR kGroupWatchTimerId = 8;
+constexpr UINT_PTR kGroupAnimTimerId = 9;          // 文件夹面板入场/退场动画
 constexpr UINT kAnimIntervalMs = 15;
 constexpr UINT kTrayMsg = WM_APP + 10;
 constexpr UINT kFullscreenCheckMsg = WM_APP + 11;
@@ -352,6 +353,15 @@ struct GroupState {
     ComPtr<ID2D1StrokeStyle> stroke;
     float formatDpi = 0.0f;
 };
+
+// 文件夹面板的过渡动画：只改 DComp 视觉对象的透明度/缩放，不重绘内容
+struct GroupAnimState {
+    bool running = false;
+    bool closing = false;
+    bool timerOn = false;
+    float t = 0.0f;
+};
+GroupAnimState gGroupAnim;
 
 struct PopupState {
     HWND hwnd = nullptr;
@@ -2309,7 +2319,101 @@ void PositionGroup() {
     SetWindowPos(gGroup.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
 }
 
+// ------------------------------------------------------- 面板过渡动画 ---
+// 只动 DComp 视觉对象的透明度和缩放，内容不重绘，每帧开销接近零。
+// 打开：透明度 0→1、缩放 0.96→1；关闭：反向，动画跑完才真正 SW_HIDE。
+constexpr float kGroupAnimOpenMs  = 140.0f;
+constexpr float kGroupAnimCloseMs = 110.0f;
+
+// 锚点取"靠近 Dock 的那一侧"，视觉上像从 Dock 长出来
+D2D1_POINT_2F GroupAnimAnchor() {
+    const float w = static_cast<float>(gGroup.w);
+    const float h = static_cast<float>(gGroup.h);
+    switch (s.edge) {
+    case 1:  return D2D1::Point2F(w * 0.5f, 0.0f);   // Dock 在顶部 → 锚上沿
+    case 0:  return D2D1::Point2F(w * 0.5f, h);      // Dock 在底部 → 锚下沿
+    case 2:  return D2D1::Point2F(0.0f, h * 0.5f);   // Dock 在左   → 锚左沿
+    default: return D2D1::Point2F(w, h * 0.5f);      // Dock 在右   → 锚右沿
+    }
+}
+
+void ApplyGroupAnim() {
+    if (!gGroup.visual) return;
+    const float t = gGroupAnim.t;
+    const float inv = 1.0f - t;
+    const float e = 1.0f - inv * inv * inv;                    // ease-out-cubic
+    const float k = gGroupAnim.closing ? (1.0f - e) : e;       // 关闭时 1 → 0
+    const float scale = 0.96f + 0.04f * k;
+    gGroup.visual->SetOpacity(k);
+    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, GroupAnimAnchor());
+    gGroup.visual->SetTransform(&m);
+    if (g.compDevice) g.compDevice->Commit();
+}
+
+void ResetGroupVisual() {
+    if (!gGroup.visual) return;
+    gGroup.visual->SetOpacity(1.0f);
+    const D2D1_MATRIX_3X2_F id = D2D1::Matrix3x2F::Identity();
+    gGroup.visual->SetTransform(&id);
+    if (g.compDevice) g.compDevice->Commit();
+}
+
+void StopGroupAnimTimer() {
+    if (!gGroupAnim.timerOn) return;
+    gGroupAnim.timerOn = false;
+    KillTimer(g.hwnd, kGroupAnimTimerId);
+}
+
+void StartGroupAnim(bool closing) {
+    if (!gGroup.visual) return;                 // 没有视觉对象（窗口异常）就不做动画
+    gGroupAnim.closing = closing;
+    gGroupAnim.running = true;
+    gGroupAnim.t = 0.0f;
+    ApplyGroupAnim();
+    if (!gGroupAnim.timerOn) {
+        gGroupAnim.timerOn = true;
+        SetTimer(g.hwnd, kGroupAnimTimerId, kAnimIntervalMs, nullptr);
+    }
+}
+
+// 退场动画结束后的收尾：这时候才真正隐藏窗口
+void FinishHideGroup() {
+    StopGroupAnimTimer();
+    gGroupAnim.running = false;
+    if (gGroup.hwnd) ShowWindow(gGroup.hwnd, SW_HIDE);
+    ResetGroupVisual();
+}
+
+void StepGroupAnim() {
+    if (!gGroupAnim.running) return;
+    const float ms = gGroupAnim.closing ? kGroupAnimCloseMs : kGroupAnimOpenMs;
+    gGroupAnim.t += static_cast<float>(kAnimIntervalMs) / ms;
+    if (gGroupAnim.t >= 1.0f) {
+        gGroupAnim.t = 1.0f;
+        ApplyGroupAnim();
+        gGroupAnim.running = false;
+        if (gGroupAnim.closing) {
+            FinishHideGroup();
+        } else {
+            StopGroupAnimTimer();
+        }
+        return;
+    }
+    ApplyGroupAnim();
+}
+
+// 正在退场时又被打开（比如快速连点另一个文件夹）：撤销动画状态，别把窗口藏掉
+void CancelGroupCloseAnim() {
+    if (!gGroupAnim.closing) return;
+    gGroupAnim.running = false;
+    gGroupAnim.closing = false;
+    StopGroupAnimTimer();
+    ResetGroupVisual();
+}
+
 LRESULT CALLBACK GroupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // 退场动画期间面板逻辑上已关闭：屏蔽鼠标，避免点到正在淡出的窗口
+    if (!gGroup.shown && msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) return 0;
     switch (msg) {
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -2513,6 +2617,7 @@ static int gGroupOwnerItem = -1;
 
 void HideGroup() {
     if (!gGroup.shown && !gGroup.hwnd) return;
+    if (gGroupAnim.running && gGroupAnim.closing) return;   // 已经在退场，别重启动画
     gGroup.shown = false;
     gGroupOwnerItem = -1;          // 面板已关，下次点击重新走"展开"分支
     gGroup.hover = -1;
@@ -2521,6 +2626,11 @@ void HideGroup() {
     if (gGroup.watchOn) {
         gGroup.watchOn = false;
         KillTimer(g.hwnd, kGroupWatchTimerId);
+    }
+    // 平滑退场：先跑动画，跑完在 FinishHideGroup() 里才真正隐藏窗口
+    if (gGroup.hwnd && gGroup.visual) {
+        StartGroupAnim(true);
+        return;
     }
     if (gGroup.hwnd) ShowWindow(gGroup.hwnd, SW_HIDE);
 }
@@ -2538,12 +2648,22 @@ void OpenGroup(const std::wstring& root, const std::wstring& title, bool pushPar
     if (!gGroup.hwnd) return;
     ResizeGroupTarget();
     if (!gGroup.bitmap) return;
+    const bool wasShown = gGroup.shown;
     gGroup.shown = true;
     gGroup.hover = -1;
     gGroup.prevMouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     gGroup.prevEscapeDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     PositionGroup();
     RenderGroup();
+
+    // 初次展开才播入场动画；同一面板里切换文件夹只换内容，不重播（否则会闪一下）。
+    // 注意顺序：先把透明度设成 0 再 ShowWindow，否则会有一帧完全可见的闪烁。
+    CancelGroupCloseAnim();
+    if (wasShown) {
+        ResetGroupVisual();
+    } else {
+        StartGroupAnim(false);
+    }
     ShowWindow(gGroup.hwnd, SW_SHOWNOACTIVATE);
 
     if (!gGroup.watchOn) {
@@ -4399,6 +4519,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             gPopup.prevMouseDown = down;
             gPopup.prevEscapeDown = esc;
+            return 0;
+        }
+        if (wp == kGroupAnimTimerId) {
+            StepGroupAnim();
             return 0;
         }
         if (wp == kGroupWatchTimerId) {
