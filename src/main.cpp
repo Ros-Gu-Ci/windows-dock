@@ -1710,12 +1710,12 @@ void EnsurePopupFormats() {
     }
 }
 
-void DrawPopupGlyph(int index, D2D1_RECT_F tile, bool active) {
+void DrawPopupGlyph(int index, D2D1_RECT_F tile, bool active, float baseInk) {
     if (!g.dc || !g.brush) return;
     const float cx = (tile.left + tile.right) * 0.5f;
     const float cy = tile.top + (tile.bottom - tile.top) * 0.33f;
     const float glyph = PopupTileH() * 0.19f;
-    const float ink = active ? 0.30f : 0.94f;
+    const float ink = active ? 0.30f : baseInk;   // 深色底用亮线，浅色底用暗线
     g.brush->SetColor(D2D1::ColorF(ink, ink, ink, 1.0f));
     const float th = std::max(1.5f * g.dpiScale, 1.2f);
     auto square = [&](float half, bool filled) {
@@ -1992,15 +1992,26 @@ void RenderPopup() {
     const D2D1_ROUNDED_RECT panel{ D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r, r };
     const float op = gPopup.opacity;
 
-    g.brush->SetColor(D2D1::ColorF(0.045f, 0.050f, 0.065f, 0.94f * op));
-    g.dc->FillRoundedRectangle(panel, g.brush.Get());
-    g.brush->SetColor(D2D1::ColorF(1, 1, 1, 0.075f * op));
-    g.dc->DrawRoundedRectangle(panel, g.brush.Get(), 1.0f);
+    // 九宫格也跟主题走：透明主题（material=1）下借用毛玻璃那套，避免没有底板看不清
+    const int popupMaterial = (s.material == 1) ? 0 : s.material;
+    D2D1_COLOR_F fill{}, line{};
+    PanelStyleFor(popupMaterial, &fill, &line);
+    const float ink = InkFor(popupMaterial);
+    fill.a *= op;
+    line.a *= op;
+    if (fill.a > 0.002f) {
+        g.brush->SetColor(fill);
+        g.dc->FillRoundedRectangle(panel, g.brush.Get());
+    }
+    if (line.a > 0.002f) {
+        g.brush->SetColor(line);
+        g.dc->DrawRoundedRectangle(panel, g.brush.Get(), 1.0f);
+    }
 
     const D2D1_RECT_F titleRect{ PopupPad(), PopupPad() * 0.6f,
                                  w - PopupPad(),
                                  PopupPad() * 0.6f + PopupHeader() * 0.75f };
-    g.brush->SetColor(D2D1::ColorF(0.97f, 0.97f, 0.99f, 0.98f * op));
+    g.brush->SetColor(D2D1::ColorF(ink, ink, ink, 0.98f * op));
     if (gPopup.title) {
         g.dc->DrawTextW(L"设置", 2, gPopup.title.Get(), titleRect, g.brush.Get());
     }
@@ -2010,20 +2021,20 @@ void RenderPopup() {
         const bool active = PopupActive(i);
         const D2D1_COLOR_F bg = active
             ? D2D1::ColorF(0.94f, 0.72f, 0.76f, 0.96f * op)
-            : D2D1::ColorF(1, 1, 1, (i == gPopup.hover ? 0.16f : 0.075f) * op);
+            : D2D1::ColorF(ink, ink, ink, (i == gPopup.hover ? 0.16f : 0.075f) * op);
         g.brush->SetColor(bg);
         const D2D1_ROUNDED_RECT rr{ tile, 8.0f * g.dpiScale, 8.0f * g.dpiScale };
         g.dc->FillRoundedRectangle(rr, g.brush.Get());
         g.brush->SetColor(active ? D2D1::ColorF(0, 0, 0, 0.10f * op)
-                                 : D2D1::ColorF(1, 1, 1, (i == gPopup.hover ? 0.11f : 0.07f) * op));
+                                 : D2D1::ColorF(ink, ink, ink, (i == gPopup.hover ? 0.18f : 0.12f) * op));
         g.dc->DrawRoundedRectangle(rr, g.brush.Get(), 1.0f);
 
-        DrawPopupGlyph(i, tile, active);
+        DrawPopupGlyph(i, tile, active, ink);
 
         const D2D1_RECT_F textRect{ tile.left + 2.0f, tile.bottom - 36.0f * g.dpiScale,
                                     tile.right - 2.0f, tile.bottom - 20.0f * g.dpiScale };
         g.brush->SetColor(active ? D2D1::ColorF(0.14f, 0.12f, 0.13f, 0.96f * op)
-                                 : D2D1::ColorF(0.96f, 0.97f, 0.99f, 0.95f * op));
+                                 : D2D1::ColorF(ink, ink, ink, 0.95f * op));
         if (gPopup.label) {
             g.dc->DrawTextW(kPopupActions[i].title,
                             static_cast<UINT32>(wcslen(kPopupActions[i].title)),
@@ -2035,7 +2046,7 @@ void RenderPopup() {
             const D2D1_RECT_F stateRect{ tile.left + 2.0f, tile.bottom - 20.0f * g.dpiScale,
                                          tile.right - 2.0f, tile.bottom - 2.0f * g.dpiScale };
             g.brush->SetColor(active ? D2D1::ColorF(0.28f, 0.19f, 0.21f, 0.82f * op)
-                                     : D2D1::ColorF(0.74f, 0.77f, 0.84f, 0.68f * op));
+                                     : D2D1::ColorF(ink, ink, ink, 0.68f * op));
             g.dc->DrawTextW(state.c_str(), static_cast<UINT32>(state.size()),
                             gPopup.caption.Get(), stateRect, g.brush.Get());
         }
