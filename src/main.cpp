@@ -198,6 +198,7 @@ struct Settings {
     int  revealDwellMs = (int)kRevealDwellMs;   // 边缘停稳多久才浮出（默认 450）
     int  retractMs     = (int)kManualRevealMs;  // 浮出后无操作多久收回（默认 3000）
     int  edgeOffset    = 0;                     // 距屏幕边缘的额外留白（像素），0 = 贴边
+    bool hotEdgeGrow   = false;                 // 触发热区是否延伸到 Dock 上沿（填满空档）
 };
 
 struct ItemAnim {
@@ -488,6 +489,7 @@ void LoadSettings() {
         else if (key == "revealDwellMs") s.revealDwellMs = atoi(val.c_str());
         else if (key == "retractMs") s.retractMs = atoi(val.c_str());
         else if (key == "edgeOffset") s.edgeOffset = atoi(val.c_str());
+        else if (key == "hotEdgeGrow") s.hotEdgeGrow = (val == "1");
     }
     if (s.material < 0 || s.material > 3) s.material = 0;
     if (s.iconSize < 28 || s.iconSize > 72) s.iconSize = 44;
@@ -515,6 +517,7 @@ void SaveSettings() {
     out << "revealDwellMs=" << s.revealDwellMs << "\n";
     out << "retractMs=" << s.retractMs << "\n";
     out << "edgeOffset=" << s.edgeOffset << "\n";
+    out << "hotEdgeGrow=" << (s.hotEdgeGrow ? 1 : 0) << "\n";
 }
 
 int ItemCount();
@@ -3206,20 +3209,22 @@ bool CursorAtHotEdge() {
     }
 
     const RECT area = DockArea();
+    // 热区厚度：默认只认真正贴边的 1px（防误触）；打开 hotEdgeGrow 后，把"屏幕边缘到
+    // Dock 上沿"这段空档也算进热区，避免 edgeOffset 让鼠标和 Dock 之间出现触发死区。
+    const int band = kHotEdgePx + (s.hotEdgeGrow ? (kMargin + s.edgeOffset) : 0);
     switch (s.edge) {
-    // 只有真正顶到屏幕边缘才算（1px）。窗口内部"靠近底部"永远不算，
-    // 这样浏览器 / 游戏里点页面下方按钮时不会被抢走。
+    // 窗口内部"靠近边缘"永远不算，这样浏览器 / 游戏里点页面下方按钮时不会被抢走。
     case 0:  // 底部：贴屏幕最下方
-        return p.y >= area.bottom - kHotEdgePx &&
+        return p.y >= area.bottom - band &&
                p.x >= d.left && p.x < d.right;
     case 1:  // 顶部
-        return p.y <= area.top + kHotEdgePx &&
+        return p.y <= area.top + band &&
                p.x >= d.left && p.x < d.right;
     case 2:  // 左侧
-        return p.x <= area.left + kHotEdgePx &&
+        return p.x <= area.left + band &&
                p.y >= d.top && p.y < d.bottom;
     default: // 右侧
-        return p.x >= area.right - kHotEdgePx &&
+        return p.x >= area.right - band &&
                p.y >= d.top && p.y < d.bottom;
     }
 }
@@ -3340,10 +3345,12 @@ void UpdateSmartHide() {
         return;
     }
 
-    // 临时浮出后：鼠标在 Dock / 面板内则续期；离开满 3 秒才重新收起。
+    // 临时浮出后：鼠标在 Dock / 面板内、或仍停在边缘热区，都算"人还在"，续期；
+    // 离开满 retractMs 才重新收起。（后者是为了 edgeOffset > 0 时鼠标停在屏幕边缘、
+    // 而 Dock 展开在其下方的那段空档——否则会出现"收起→唤出→收起"的死循环。）
     if (g.hoverRevealed) {
         const DWORD now = GetTickCount();
-        if (CursorInsideDock() || CursorInsidePanel()) {
+        if (CursorInsideDock() || CursorInsidePanel() || CursorAtHotEdge()) {
             g.revealHideAt = now + (DWORD)s.retractMs;
             return;
         }
