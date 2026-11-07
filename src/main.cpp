@@ -2802,7 +2802,10 @@ void ShowLabelFor(int index) {
     if (text.empty()) return;
 
     static Gdiplus::FontFamily family(L"Microsoft YaHei UI");
-    Gdiplus::Font font(&family, 9.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    // 标签文字：10.5pt + 加粗。原来 9.5pt 常规在 125% 缩放下只有约 16px，
+    // 中文密集字（“箱”“具”）笔画发虚；雅黑有真正的 Bold 字面，中文宽度不变、
+    // 英文只宽 4~6%，标签胶囊由 MeasureString 自动适应，不需要改布局。
+    Gdiplus::Font font(&family, 10.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::StringFormat fmt;
     fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
     fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
