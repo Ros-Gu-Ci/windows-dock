@@ -718,15 +718,20 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
     if (FAILED(conv->CopyPixels(nullptr, stride, static_cast<UINT>(buf.size()), buf.data())))
         return nullptr;
 
-    // 内容包围盒：跳过全透明像素（空白）和近白像素（系统加的白边）
+    // 内容包围盒：跳过全透明像素（空白）和近白像素（系统加的白边）。
+    // 注意：WIC 给的是"预乘"格式，半透明白边会被预乘压暗（alpha=60 的白边 RGB 只有 60），
+    // 直接比 >240 会被漏掉，必须先把颜色还原成非预乘再判白。
     int minX = static_cast<int>(sw), minY = static_cast<int>(sh), maxX = -1, maxY = -1;
     for (UINT y = 0; y < sh; ++y) {
         const BYTE* row = buf.data() + static_cast<size_t>(y) * stride;
         for (UINT x = 0; x < sw; ++x) {
             const BYTE* p = row + x * 4;                  // BGRA（预乘）
-            const bool opaque = p[3] > 16;
-            const bool white = p[0] > 240 && p[1] > 240 && p[2] > 240;
-            if (!opaque || white) continue;
+            const UINT a = p[3];
+            if (a <= 16) continue;                        // 全透明：空白
+            const UINT bb = static_cast<UINT>(p[0]) * 255 / a;
+            const UINT gg = static_cast<UINT>(p[1]) * 255 / a;
+            const UINT rr = static_cast<UINT>(p[2]) * 255 / a;
+            if (rr > 240 && gg > 240 && bb > 240) continue;   // 白边
             if (static_cast<int>(x) < minX) minX = static_cast<int>(x);
             if (static_cast<int>(x) > maxX) maxX = static_cast<int>(x);
             if (static_cast<int>(y) < minY) minY = static_cast<int>(y);
@@ -737,7 +742,10 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
 
     const UINT cw = static_cast<UINT>(maxX - minX + 1);
     const UINT chh = static_cast<UINT>(maxY - minY + 1);
-    if (cw * 100 >= sw * 85 && chh * 100 >= sh * 85) return nullptr;  // 本来够满，不动
+    // 只在"内容不到画布一半"时才动手：这属于明显的留白/白框；
+    // 像 QQ(69%)、Steam(95%) 这类正常图标不会被误裁。
+    Dbg(L"icon bbox %ux%u in %ux%u", cw, chh, sw, sh);
+    if (cw * 2 >= sw || chh * 2 >= sh) return nullptr;
 
     ComPtr<IWICBitmap> cropped;
     if (FAILED(g.wic->CreateBitmapFromSourceRect(conv.Get(), static_cast<UINT>(minX),
