@@ -78,6 +78,8 @@ constexpr int kPadX = 14;
 constexpr int kPadY = 12;
 constexpr int kGap = 10;
 constexpr int kMargin = 8;
+// edgeOffset 的允许上限：再大就会让"贴边"的语义失效，见 README 里的说明
+constexpr int kEdgeOffsetMax = 200;
 constexpr UINT_PTR kAnimTimerId = 1;
 constexpr UINT_PTR kFullscreenTimerId = 2;
 constexpr UINT_PTR kSmartTimerId = 3;
@@ -195,6 +197,7 @@ struct Settings {
     bool edgeReveal = true;      // 自动收起后，鼠标顶到屏幕边缘可唤出
     int  revealDwellMs = (int)kRevealDwellMs;   // 边缘停稳多久才浮出（默认 450）
     int  retractMs     = (int)kManualRevealMs;  // 浮出后无操作多久收回（默认 3000）
+    int  edgeOffset    = 0;                     // 距屏幕边缘的额外留白（像素），0 = 贴边
 };
 
 struct ItemAnim {
@@ -484,12 +487,14 @@ void LoadSettings() {
         else if (key == "edgeReveal") s.edgeReveal = (val == "1");
         else if (key == "revealDwellMs") s.revealDwellMs = atoi(val.c_str());
         else if (key == "retractMs") s.retractMs = atoi(val.c_str());
+        else if (key == "edgeOffset") s.edgeOffset = atoi(val.c_str());
     }
     if (s.material < 0 || s.material > 3) s.material = 0;
     if (s.iconSize < 28 || s.iconSize > 72) s.iconSize = 44;
     if (s.edge < 0 || s.edge > 3) s.edge = 0;
     if (s.revealDwellMs < 80 || s.revealDwellMs > 5000) s.revealDwellMs = (int)kRevealDwellMs;
     if (s.retractMs < 300 || s.retractMs > 20000) s.retractMs = (int)kManualRevealMs;
+    if (s.edgeOffset < 0 || s.edgeOffset > kEdgeOffsetMax) s.edgeOffset = 0;
 }
 
 void SaveSettings() {
@@ -509,6 +514,7 @@ void SaveSettings() {
     out << "edgeReveal=" << (s.edgeReveal ? 1 : 0) << "\n";
     out << "revealDwellMs=" << s.revealDwellMs << "\n";
     out << "retractMs=" << s.retractMs << "\n";
+    out << "edgeOffset=" << s.edgeOffset << "\n";
 }
 
 int ItemCount();
@@ -1410,18 +1416,18 @@ RECT BaseDockRect() {
     switch (s.edge) {
     case 0:  // 底部
         r.left = work.left + ((work.right - work.left) - w) / 2;
-        r.top = work.bottom - h - kMargin;
+        r.top = work.bottom - h - kMargin - s.edgeOffset;
         break;
     case 1:  // 顶部
         r.left = work.left + ((work.right - work.left) - w) / 2;
-        r.top = work.top + kMargin;
+        r.top = work.top + kMargin + s.edgeOffset;
         break;
     case 2:  // 左侧
-        r.left = work.left + kMargin;
+        r.left = work.left + kMargin + s.edgeOffset;
         r.top = work.top + ((work.bottom - work.top) - h) / 2;
         break;
     default: // 右侧
-        r.left = work.right - w - kMargin;
+        r.left = work.right - w - kMargin - s.edgeOffset;
         r.top = work.top + ((work.bottom - work.top) - h) / 2;
         break;
     }
@@ -2853,8 +2859,11 @@ bool StepAnimation() {
         moving = true;
     }
 
-    // 完全收起（已滑出屏幕）→ 直接隐藏窗口，桌面上不留任何痕迹
-        if (g.autoHidden && (g.slide >= 0.999f || (g.opacity <= 0.02f && s.material != 0)) && g.winShown) {
+    // 完全收起：① 已滑出屏幕，或 ② 内容已淡到全透明且不是毛玻璃材质
+    // ② 是针对 DWM 圆角窗口的补丁：透明/实心材质下淡完之后窗口里已无内容，但窗口还挂在
+    // 屏幕上走完滑动，DWM 会继续画系统投影，表现为"收回后残影多留零点几秒"。
+    // 这里提前隐藏窗口；下次显示时 SetAutoHidden(false) 会把 slide 重置为 1，位置不受影响。
+    if (g.autoHidden && (g.slide >= 0.999f || (g.opacity <= 0.02f && s.material != 0)) && g.winShown) {
         g.winShown = false;
         ShowWindow(g.hwnd, SW_HIDE);
         HideLabel();
