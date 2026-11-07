@@ -3669,12 +3669,9 @@ HMENU BuildMenu(int itemIndex) {
 }
 
 void HandleCommand(int cmd) {
-    if (cmd >= kCmdRemoveBase) {
-        RemoveItem(cmd - kCmdRemoveBase);
-        return;
-    }
-
     // 时序 / 边缘留白：档位命令，改完立即生效（不需要重启）
+    // 必须放在下面那条 "移除第 N 项" 的兜底判断之前——档位 ID 是 300+，会被
+    // cmd >= kCmdRemoveBase(100) 误吞掉，表现为"点了菜单完全没反应"。
     {
         static const int dwellVals[] = { 80, 150, 300, 450 };
         static const int retractVals[] = { 300, 500, 750, 1000, 1250, 1500 };
@@ -3703,6 +3700,12 @@ void HandleCommand(int cmd) {
             RefreshPopupIfShown();
             return;
         }
+    }
+
+    // 「移除第 N 项」：编号从 100 起，上界卡在档位区之前，避免吞掉 300+ 的命令
+    if (cmd >= kCmdRemoveBase && cmd < kCmdDwellBase) {
+        RemoveItem(cmd - kCmdRemoveBase);
+        return;
     }
     switch (cmd) {
     case kCmdToggle: ToggleVisibility(); break;
