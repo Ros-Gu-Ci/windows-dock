@@ -1252,8 +1252,8 @@ HRESULT CreateDeviceResources() {
     return CreateTargetBitmap();
 }
 // ------------------------------------------------------------------ render ---
-void PanelStyle(D2D1_COLOR_F* fill, D2D1_COLOR_F* border) {
-    switch (s.material) {
+void PanelStyleFor(int material, D2D1_COLOR_F* fill, D2D1_COLOR_F* border) {
+    switch (material) {
     case 0:
         // 系统 Acrylic 在 Win11 上会忽略我们给的色调、用系统深色底，
         // 所以叠一层浅白半透明蒙层把整体压成"浅白毛玻璃"。
@@ -1275,8 +1275,13 @@ void PanelStyle(D2D1_COLOR_F* fill, D2D1_COLOR_F* border) {
     }
 }
 
+void PanelStyle(D2D1_COLOR_F* fill, D2D1_COLOR_F* border) {
+    PanelStyleFor(s.material, fill, border);
+}
+
 // 面板偏亮时用深色笔（浅色实心 / 浅白毛玻璃），否则用白色笔
-float InkW() { return (s.material == 3 || s.material == 0) ? 0.15f : 1.0f; }
+float InkFor(int material) { return (material == 3 || material == 0) ? 0.15f : 1.0f; }
+float InkW() { return InkFor(s.material); }
 
 void EnsureClockFormats() {
     if (!g.dwrite) return;
@@ -2571,12 +2576,13 @@ void RenderGroup() {
     const float r = 18.0f * g.dpiScale;
     const D2D1_ROUNDED_RECT panel{ D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r, r };
 
-    // 层次 1：背景直接复用主 Dock 的 PanelStyle()，不再维护第二张颜色表。
-    // 这样换主题时两处必然一致。注意面板本身没有 DWM 模糊底衬，所以
-    // material=0 的「白 20%」在这里会显得很透；material=1（透明模式）则是完全没有底板。
+    // 层次 1：背景直接复用主 Dock 的 PanelStyleFor()，不再维护第二张颜色表。
+    // 透明主题（material=1）下主 Dock 不画底板，但文件夹面板若也透明就完全看不清，
+    // 所以面板在这里把 1 映射成 0 —— 直接套用毛玻璃主题的那套设定（白 20% + 白 35% 描边）。
+    const int panelMaterial = (s.material == 1) ? 0 : s.material;
     D2D1_COLOR_F fill{}, line{};
-    PanelStyle(&fill, &line);
-    const float ink = InkW();
+    PanelStyleFor(panelMaterial, &fill, &line);
+    const float ink = InkFor(panelMaterial);
     if (fill.a > 0.002f) {
         g.brush->SetColor(fill);
         g.dc->FillRoundedRectangle(panel, g.brush.Get());
