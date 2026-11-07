@@ -2802,10 +2802,12 @@ void ShowLabelFor(int index) {
     if (text.empty()) return;
 
     static Gdiplus::FontFamily family(L"Microsoft YaHei UI");
-    // 标签文字：10.5pt + 加粗。原来 9.5pt 常规在 125% 缩放下只有约 16px，
-    // 中文密集字（“箱”“具”）笔画发虚；雅黑有真正的 Bold 字面，中文宽度不变、
-    // 英文只宽 4~6%，标签胶囊由 MeasureString 自动适应，不需要改布局。
-    Gdiplus::Font font(&family, 10.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+    // 关键：字号必须落到"整数像素"。
+    // 原来 10.5pt 在 125% 缩放下 = 10.5 × 96/72 × 1.25 = 17.5px，是半像素；
+    // GDI+ 按浮点 em 栅格化，笔画落不到像素网格上，抗锯齿一混就成了"灰块"，
+    // 中文小字尤其明显（加粗后更糊）。改成按 DPI 算出整数像素再建字体。
+    const float fontPx = std::round(10.5f * (96.0f / 72.0f) * (g.dpiScale > 0.0f ? g.dpiScale : 1.0f));
+    Gdiplus::Font font(&family, fontPx, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
     Gdiplus::StringFormat fmt;
     fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
     fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -2814,7 +2816,7 @@ void ShowLabelFor(int index) {
     {
         Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
         Gdiplus::Graphics pg(&probe);
-        pg.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+        pg.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
         Gdiplus::RectF bounds;
         pg.MeasureString(text.c_str(), static_cast<INT>(text.size()), &font, Gdiplus::PointF(0, 0),
                          &fmt, &bounds);
@@ -2872,7 +2874,7 @@ void ShowLabelFor(int index) {
     {
         Gdiplus::Graphics gfx(mem);
         gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+        gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
         const float r = h * 0.5f;
         const float W = static_cast<float>(w);
@@ -2894,12 +2896,15 @@ void ShowLabelFor(int index) {
                                               lightBg ? 250 : 26));
         gfx.FillPath(&bg, &path);
 
-        // 1px 描边也自动取反：白底上用深边，黑底上用浅边
-        Gdiplus::Pen edge(Gdiplus::Color(40,
-                                         lightBg ? 0 : 255,
-                                         lightBg ? 0 : 255,
-                                         lightBg ? 0 : 255), 1.0f);
-        gfx.DrawPath(&edge, &path);
+        // 1px 描边也自动取反：白底上用深边，黑底上用浅边。
+        // 背景几乎全透明时（bgA 很小）不画这圈边，否则会剩下一个"若隐若现的空胶囊框"。
+        if (bgA > 8) {
+            Gdiplus::Pen edge(Gdiplus::Color(40,
+                                             lightBg ? 0 : 255,
+                                             lightBg ? 0 : 255,
+                                             lightBg ? 0 : 255), 1.0f);
+            gfx.DrawPath(&edge, &path);
+        }
 
         Gdiplus::SolidBrush fg(Gdiplus::Color(255,
                                               lightBg ? 20 : 246,
