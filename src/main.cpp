@@ -4306,6 +4306,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         const int y = GET_Y_LPARAM(lp);
         const int idx = HitTest(x, y);
 
+        // 文件夹面板开着时，点任何"非文件夹类"的槽位（其他应用 / 九宫格 / 加号）
+        // 先把面板收掉。必须放在抬起时而不是按下时：按下就收会让 gGroup.shown 变 false，
+        // 等到抬起时 ActivateItem 会误判成"重新展开"，把双击打开的语义顶掉。
+        if (gGroup.shown && idx >= 0 && !IsDockItemGroup(idx)) HideGroup();
+
         if (g.pressIndex < 0 && g.suppressClick) {
             g.suppressClick = false;
             Render();
