@@ -3376,7 +3376,11 @@ bool AnyWindowOverDock() {
 //   · 只在 Dock 朝向的那条屏幕边缘；
 //   · 厚度仅 4px（真正"撞到屏幕边"）；
 //   · 还需停留 ~190ms，快速划过不会触发。
-bool CursorAtHotEdge() {
+// keepAlive=true ：这是"已经弹出后别收回"的判定 —— 把屏幕边缘到 Dock 上沿那段空档也算进来，
+//                  鼠标停留在空隙里时 Dock 保持展开。
+// keepAlive=false：这是"从收起状态唤出"的判定 —— 只认真正贴边的 1px，
+//                  必须把鼠标顶到屏幕最边缘才会弹出，不会提前触发。
+bool CursorAtHotEdge(bool keepAlive = false) {
     POINT p{};
     if (!GetCursorPos(&p)) return false;
     const RECT d = g.baseRect;
@@ -3387,9 +3391,8 @@ bool CursorAtHotEdge() {
     }
 
     const RECT area = DockArea();
-    // 热区厚度：默认只认真正贴边的 1px（防误触）；打开 hotEdgeGrow 后，把"屏幕边缘到
-    // Dock 上沿"这段空档也算进热区，避免 edgeOffset 让鼠标和 Dock 之间出现触发死区。
-    const int band = kHotEdgePx + (s.hotEdgeGrow ? (kMargin + s.edgeOffset) : 0);
+    const bool grow = keepAlive && s.hotEdgeGrow;
+    const int band = kHotEdgePx + (grow ? (kMargin + s.edgeOffset) : 0);
     switch (s.edge) {
     // 窗口内部"靠近边缘"永远不算，这样浏览器 / 游戏里点页面下方按钮时不会被抢走。
     case 0:  // 底部：贴屏幕最下方
@@ -3528,7 +3531,7 @@ void UpdateSmartHide() {
     // 而 Dock 展开在其下方的那段空档——否则会出现"收起→唤出→收起"的死循环。）
     if (g.hoverRevealed) {
         const DWORD now = GetTickCount();
-        if (CursorInsideDock() || CursorInsidePanel() || CursorAtHotEdge()) {
+        if (CursorInsideDock() || CursorInsidePanel() || CursorAtHotEdge(true)) {
             g.revealHideAt = now + (DWORD)s.retractMs;
             return;
         }
@@ -3812,7 +3815,7 @@ HMENU BuildMenu(int itemIndex) {
         const std::wstring title = L"距屏幕边缘：" + std::to_wstring(s.edgeOffset) + L" px";
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
     }
-    AppendMenuW(menu, MF_STRING | (s.hotEdgeGrow ? MF_CHECKED : 0), kCmdHotEdgeGrow, L"触发热区加厚");
+    AppendMenuW(menu, MF_STRING | (s.hotEdgeGrow ? MF_CHECKED : 0), kCmdHotEdgeGrow, L"边缘空隙保持展开");
 
     // 悬停标签：背景黑白、不透明度档位（含自定义）、文字描边
     {
