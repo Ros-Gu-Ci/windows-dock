@@ -718,32 +718,28 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
     if (FAILED(conv->CopyPixels(nullptr, stride, static_cast<UINT>(buf.size()), buf.data())))
         return nullptr;
 
-    // 内容包围盒：跳过全透明像素（空白）和近白像素（系统加的白边）。
-    // 注意：WIC 给的是"预乘"格式，半透明白边会被预乘压暗（alpha=60 的白边 RGB 只有 60），
-    // 直接比 >240 会被漏掉，必须先把颜色还原成非预乘再判白。
+    // 内容包围盒：只认真实图案（alpha > 128）。
+    // 那圈白边和图标外围的浅阴影 alpha 都在 128 以下，会被一并忽略——这正是我们要的：
+    // 实测 110px 下，无畏契约/图吧的图案只有 48x48、47x46，而画布是 110x110；
+    // 若按 alpha>16 算，白边和阴影会把包围盒撑满整张画布，判定就会失效。
     int minX = static_cast<int>(sw), minY = static_cast<int>(sh), maxX = -1, maxY = -1;
     for (UINT y = 0; y < sh; ++y) {
         const BYTE* row = buf.data() + static_cast<size_t>(y) * stride;
         for (UINT x = 0; x < sw; ++x) {
             const BYTE* p = row + x * 4;                  // BGRA（预乘）
-            const UINT a = p[3];
-            if (a <= 16) continue;                        // 全透明：空白
-            const UINT bb = static_cast<UINT>(p[0]) * 255 / a;
-            const UINT gg = static_cast<UINT>(p[1]) * 255 / a;
-            const UINT rr = static_cast<UINT>(p[2]) * 255 / a;
-            if (rr > 240 && gg > 240 && bb > 240) continue;   // 白边
+            if (p[3] <= 128) continue;                    // 浅阴影 / 半透明留白 / 白边
             if (static_cast<int>(x) < minX) minX = static_cast<int>(x);
             if (static_cast<int>(x) > maxX) maxX = static_cast<int>(x);
             if (static_cast<int>(y) < minY) minY = static_cast<int>(y);
             if (static_cast<int>(y) > maxY) maxY = static_cast<int>(y);
         }
     }
-    if (maxX < minX || maxY < minY) return nullptr;       // 纯白/无内容图标，保持原样
+    if (maxX < minX || maxY < minY) return nullptr;       // 近乎全透明（比如淡色 logo），保持原样
 
     const UINT cw = static_cast<UINT>(maxX - minX + 1);
     const UINT chh = static_cast<UINT>(maxY - minY + 1);
-    // 只在"内容不到画布一半"时才动手：这属于明显的留白/白框；
-    // 像 QQ(69%)、Steam(95%) 这类正常图标不会被误裁。
+    // 只在"图案不到画布一半"时才动手：这属于明显的留白/白框。
+    // 实测 QQ(110x110)、Steam(104x100)、WizTree(100x87) 都不会触发。
     Dbg(L"icon bbox %ux%u in %ux%u", cw, chh, sw, sh);
     if (cw * 2 >= sw || chh * 2 >= sh) return nullptr;
 
