@@ -2337,6 +2337,17 @@ D2D1_POINT_2F GroupAnimAnchor() {
     }
 }
 
+// SDK 版本差异：IDCompositionVisual::SetTransform 在不同头文件里分别声明为
+// 取指针 / 取引用。用 SFINAE 自动选能编译的那一种，避免构建往返。
+template <typename TV, typename TM>
+static auto SetVisualMatrix(TV* v, const TM& m, int) -> decltype(v->SetTransform(m), void()) {
+    v->SetTransform(m);
+}
+template <typename TV, typename TM>
+static auto SetVisualMatrix(TV* v, const TM& m, long) -> decltype(v->SetTransform(&m), void()) {
+    v->SetTransform(&m);
+}
+
 void ApplyGroupAnim() {
     if (!gGroup.visual) return;
     const float t = gGroupAnim.t;
@@ -2346,7 +2357,7 @@ void ApplyGroupAnim() {
     const float scale = 0.96f + 0.04f * k;
     gGroup.visual->SetOpacity(k);
     const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, GroupAnimAnchor());
-    gGroup.visual->SetTransform(&m);
+    SetVisualMatrix(gGroup.visual.Get(), m, 0);
     if (g.compDevice) g.compDevice->Commit();
 }
 
@@ -2354,7 +2365,7 @@ void ResetGroupVisual() {
     if (!gGroup.visual) return;
     gGroup.visual->SetOpacity(1.0f);
     const D2D1_MATRIX_3X2_F id = D2D1::Matrix3x2F::Identity();
-    gGroup.visual->SetTransform(&id);
+    SetVisualMatrix(gGroup.visual.Get(), id, 0);
     if (g.compDevice) g.compDevice->Commit();
 }
 
