@@ -738,10 +738,10 @@ ComPtr<IWICBitmap> NormalizeIconWic(IWICBitmap* src, UINT px) {
 
     const UINT cw = static_cast<UINT>(maxX - minX + 1);
     const UINT chh = static_cast<UINT>(maxY - minY + 1);
-    // 只在"图案不到画布一半"时才动手：这属于明显的留白/白框。
-    // 实测 QQ(110x110)、Steam(104x100)、WizTree(100x87) 都不会触发。
+    // 门槛 65%：实测（110px 画布）无畏契约 60x60、图吧 57x57 会被裁；
+    // 其余条目最小的也有 75x75（68%），一个都不会误伤。
     Dbg(L"icon bbox %ux%u in %ux%u", cw, chh, sw, sh);
-    if (cw * 2 >= sw || chh * 2 >= sh) return nullptr;
+    if (cw * 100 >= sw * 65 || chh * 100 >= sh * 65) return nullptr;
 
     ComPtr<IWICBitmap> cropped;
     if (FAILED(g.wic->CreateBitmapFromSourceRect(conv.Get(), static_cast<UINT>(minX),
