@@ -2507,9 +2507,14 @@ void RenderGroup() {
     gGroup.swap->Present(1, 0);
 }
 
+// 记住是哪个 Dock 条目打开了文件夹面板：
+// 面板开着的期间再点同一个图标，就当成"切换用资源管理器打开"。
+static int gGroupOwnerItem = -1;
+
 void HideGroup() {
     if (!gGroup.shown && !gGroup.hwnd) return;
     gGroup.shown = false;
+    gGroupOwnerItem = -1;          // 面板已关，下次点击重新走"展开"分支
     gGroup.hover = -1;
     gGroup.prevMouseDown = false;
     gGroup.prevEscapeDown = false;
@@ -2555,6 +2560,25 @@ void OpenGroupAtItem(int index) {
     HidePopup();
     gGroup.parents.clear();
     OpenGroup(root, FileNameOf(g.items[static_cast<size_t>(index)]), false);
+}
+
+// 点击"文件夹类条目"的统一入口（取代原来两处 IsDockItemGroup 分支）：
+//   · 面板没开 / 开的是别的条目 → 展开这个文件夹的面板
+//   · 面板开着的就是这个条目   → 关闭面板，改用资源管理器打开
+// 完全按状态判断，不做双击时间判定，所以单击立刻响应、也不会手快误判。
+void ActivateItem(int index) {
+    if (index < 0 || index >= ItemCount()) return;
+    if (!IsDockItemGroup(index)) {
+        LaunchItem(index);
+        return;
+    }
+    if (gGroup.shown && gGroupOwnerItem == index) {
+        HideGroup();
+        LaunchItem(index);
+        return;
+    }
+    OpenGroupAtItem(index);
+    gGroupOwnerItem = index;
 }
 
 void GroupActivate(int index) {
@@ -4301,8 +4325,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (idx == pressed) {
-                if (IsDockItemGroup(idx)) OpenGroupAtItem(idx);
-                else LaunchItem(idx);
+                ActivateItem(idx);
             }
             return 0;
         }
@@ -4312,8 +4335,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (idx >= 0 && idx == AddIndex()) {
             AddViaDialog();
         } else if (idx >= 0 && idx < ItemCount()) {
-            if (IsDockItemGroup(idx)) OpenGroupAtItem(idx);
-            else LaunchItem(idx);
+            ActivateItem(idx);
         }
         return 0;
     }
