@@ -152,6 +152,11 @@ enum : UINT {
     kCmdRetractBase = 310,   // 300 / 500 / 750 / 1000 / 1250 / 1500
     kCmdOffsetBase = 320,    // 0 / 8 / 16 / 20 / 24 / 28 / 32 / 36 / 48 / 64
     kCmdHotEdgeGrow = 330,
+    // 悬停标签：背景黑白二选一、不透明度档位、文字描边
+    kCmdLabelBgBase = 340,       // 0 黑 / 1 白
+    kCmdLabelAlphaBase = 350,    // 0 / 20 / 40 / 60 / 80 / 100 %
+    kCmdLabelAlphaCustom = 356,  // 自定义…（弹输入框）
+    kCmdLabelOutline = 360,
     kCmdRemoveBase = 100,
 };
 
@@ -205,6 +210,10 @@ struct Settings {
     int  retractMs     = (int)kManualRevealMs;  // 浮出后无操作多久收回（默认 3000）
     int  edgeOffset    = 0;                     // 距屏幕边缘的额外留白（像素），0 = 贴边
     bool hotEdgeGrow   = false;                 // 触发热区是否延伸到 Dock 上沿（填满空档）
+
+    int  labelBg       = 0;                     // 悬停标签背景：0 黑 1 白
+    int  labelAlphaPct = 90;                    // 悬停标签背景不透明度 0..100（默认接近原观感 232/255）
+    bool labelOutline  = false;                 // 悬停标签文字描边：低不透明度时保证可读
 };
 
 struct ItemAnim {
@@ -496,6 +505,9 @@ void LoadSettings() {
         else if (key == "retractMs") s.retractMs = atoi(val.c_str());
         else if (key == "edgeOffset") s.edgeOffset = atoi(val.c_str());
         else if (key == "hotEdgeGrow") s.hotEdgeGrow = (val == "1");
+        else if (key == "labelBg") s.labelBg = atoi(val.c_str());
+        else if (key == "labelAlphaPct") s.labelAlphaPct = atoi(val.c_str());
+        else if (key == "labelOutline") s.labelOutline = (val == "1");
     }
     if (s.material < 0 || s.material > 3) s.material = 0;
     if (s.iconSize < 28 || s.iconSize > 72) s.iconSize = 44;
@@ -506,6 +518,9 @@ void LoadSettings() {
     if (s.retractMs > 20000) s.retractMs = 20000;
     if (s.edgeOffset < 0) s.edgeOffset = 0;
     if (s.edgeOffset > kEdgeOffsetMax) s.edgeOffset = kEdgeOffsetMax;
+    if (s.labelBg < 0 || s.labelBg > 1) s.labelBg = 0;
+    if (s.labelAlphaPct < 0) s.labelAlphaPct = 0;
+    if (s.labelAlphaPct > 100) s.labelAlphaPct = 100;
 }
 
 void SaveSettings() {
@@ -527,6 +542,9 @@ void SaveSettings() {
     out << "retractMs=" << s.retractMs << "\n";
     out << "edgeOffset=" << s.edgeOffset << "\n";
     out << "hotEdgeGrow=" << (s.hotEdgeGrow ? 1 : 0) << "\n";
+    out << "labelBg=" << s.labelBg << "\n";
+    out << "labelAlphaPct=" << s.labelAlphaPct << "\n";
+    out << "labelOutline=" << (s.labelOutline ? 1 : 0) << "\n";
 }
 
 int ItemCount();
@@ -2863,13 +2881,47 @@ void ShowLabelFor(int index) {
         path.AddArc(0.0f, H - r * 2, r * 2, r * 2, 90.0f, 90.0f);
         path.CloseFigure();
 
-        Gdiplus::SolidBrush bg(Gdiplus::Color(232, 18, 20, 26));
+        // 背景/文字颜色：白色背景配深色文字，黑色背景配浅色文字（自动相反，不会配出白底白字）
+        const bool lightBg = (s.labelBg == 1);
+        const BYTE bgA = static_cast<BYTE>(s.labelAlphaPct * 255 / 100);
+
+        Gdiplus::SolidBrush bg(Gdiplus::Color(bgA,
+                                              lightBg ? 250 : 18,
+                                              lightBg ? 250 : 20,
+                                              lightBg ? 250 : 26));
         gfx.FillPath(&bg, &path);
 
-        Gdiplus::Pen edge(Gdiplus::Color(40, 255, 255, 255), 1.0f);
+        // 1px 描边也自动取反：白底上用深边，黑底上用浅边
+        Gdiplus::Pen edge(Gdiplus::Color(40,
+                                         lightBg ? 0 : 255,
+                                         lightBg ? 0 : 255,
+                                         lightBg ? 0 : 255), 1.0f);
         gfx.DrawPath(&edge, &path);
 
-        Gdiplus::SolidBrush fg(Gdiplus::Color(255, 246, 247, 250));
+        Gdiplus::SolidBrush fg(Gdiplus::Color(255,
+                                              lightBg ? 20 : 246,
+                                              lightBg ? 22 : 247,
+                                              lightBg ? 26 : 250));
+
+        // 文字描边：把文字往八个方向各偏移 1px 画一遍底色，再叠正文。
+        // 这样背景不透明度拉到 0 时，文字压在浅色壁纸上也不会糊。
+        if (s.labelOutline) {
+            // 描边用"不透明"的背景色：否则 labelAlphaPct=0 时描边也跟着透明，等于没描
+            Gdiplus::SolidBrush ol(Gdiplus::Color(255,
+                                                  lightBg ? 250 : 18,
+                                                  lightBg ? 250 : 20,
+                                                  lightBg ? 250 : 26));
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    if (dx == 0 && dy == 0) continue;
+                    gfx.DrawString(text.c_str(), static_cast<INT>(text.size()), &font,
+                                   Gdiplus::RectF(static_cast<Gdiplus::REAL>(dx),
+                                                  static_cast<Gdiplus::REAL>(dy),
+                                                  W, H), &fmt, &ol);
+                }
+            }
+        }
+
         gfx.DrawString(text.c_str(), static_cast<INT>(text.size()), &font,
                        Gdiplus::RectF(0.0f, 0.0f, W, H), &fmt, &fg);
     }
@@ -2899,6 +2951,15 @@ void ShowLabelFor(int index) {
     ReleaseDC(nullptr, screen);
 
     gLabel.shownFor = index;
+}
+
+// 样式改完后立刻按新参数重画一次（标签只在下一次悬停时才会重建，否则要移开鼠标再回来）
+void RefreshLabelStyle() {
+    if (!gLabel.hwnd || !IsWindowVisible(gLabel.hwnd)) return;
+    const int idx = gLabel.shownFor;
+    if (idx < 0) return;
+    gLabel.shownFor = -1;
+    ShowLabelFor(idx);
 }
 // -------------------------------------------------------------------- anim ---
 void StartAnimTimer() {
@@ -3745,6 +3806,28 @@ HMENU BuildMenu(int itemIndex) {
     }
     AppendMenuW(menu, MF_STRING | (s.hotEdgeGrow ? MF_CHECKED : 0), kCmdHotEdgeGrow, L"触发热区加厚");
 
+    // 悬停标签：背景黑白、不透明度档位（含自定义）、文字描边
+    {
+        HMENU sub = CreatePopupMenu();
+        AppendMenuW(sub, MF_STRING | (s.labelBg == 0 ? MF_CHECKED : 0), kCmdLabelBgBase + 0, L"黑色");
+        AppendMenuW(sub, MF_STRING | (s.labelBg == 1 ? MF_CHECKED : 0), kCmdLabelBgBase + 1, L"白色");
+        const std::wstring title = (s.labelBg == 1) ? L"标签背景：白色" : L"标签背景：黑色";
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
+    }
+    {
+        static const int pcts[] = { 0, 20, 40, 60, 80, 100 };
+        HMENU sub = CreatePopupMenu();
+        for (int i = 0; i < ARRAYSIZE(pcts); ++i) {
+            AppendMenuW(sub, MF_STRING | (s.labelAlphaPct == pcts[i] ? MF_CHECKED : 0),
+                        kCmdLabelAlphaBase + i, (std::to_wstring(pcts[i]) + L"%").c_str());
+        }
+        AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(sub, MF_STRING, kCmdLabelAlphaCustom, L"自定义…");
+        const std::wstring title = L"标签不透明度：" + std::to_wstring(s.labelAlphaPct) + L"%";
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
+    }
+    AppendMenuW(menu, MF_STRING | (s.labelOutline ? MF_CHECKED : 0), kCmdLabelOutline, L"标签文字描边");
+
     HMENU modules = CreatePopupMenu();
     AppendMenuW(modules, MF_STRING | (s.showClock ? MF_CHECKED : 0), kCmdShowClock, L"日期时间");
     AppendMenuW(modules, MF_STRING | (s.showCenter ? MF_CHECKED : 0), kCmdShowCenter, L"九宫格设置");
@@ -3767,6 +3850,111 @@ HMENU BuildMenu(int itemIndex) {
     AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
 
     return menu;
+}
+
+// ------------------------------------------------------------------ prompt ---
+// 极简模态输入框：用系统 EDIT / BUTTON 类现场创建，不需要 .rc 资源模板。
+struct PromptState {
+    HWND edit = nullptr;
+    int  value = 0, lo = 0, hi = 100;
+    bool done = false, ok = false;
+};
+
+LRESULT CALLBACK PromptProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    PromptState* st = reinterpret_cast<PromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        const CREATESTRUCTW* cs = reinterpret_cast<const CREATESTRUCTW*>(lp);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return 0;
+    }
+    case WM_COMMAND:
+        if (!st) return 0;
+        if (LOWORD(wp) == 1) {                       // 确定
+            wchar_t buf[16]{};
+            GetWindowTextW(st->edit, buf, 16);
+            int v = 0;                               // 手写解析，避免依赖 _wtoi
+            for (const wchar_t* p = buf; *p >= L'0' && *p <= L'9'; ++p) v = v * 10 + (*p - L'0');
+            if (v < st->lo) v = st->lo;
+            if (v > st->hi) v = st->hi;
+            st->value = v;
+            st->ok = true;
+            st->done = true;
+            DestroyWindow(hwnd);
+        } else if (LOWORD(wp) == 2) {                // 取消
+            st->done = true;
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (st) st->done = true;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// 返回用户输入值；取消返回 -1
+int PromptInt(HWND owner, const wchar_t* caption, const wchar_t* hint, int defVal, int lo, int hi) {
+    static bool once = false;
+    if (!once) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = PromptProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"DockPromptWindow";
+        RegisterClassExW(&wc);
+        once = true;
+    }
+
+    PromptState st;
+    st.value = defVal;
+    st.lo = lo;
+    st.hi = hi;
+
+    const float sc = (g.dpiScale > 0.0f) ? g.dpiScale : 1.0f;
+    auto S = [sc](int v) { return static_cast<int>(v * sc); };
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(owner ? owner : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY), &mi);
+    const int cw = S(320), chh = S(160);
+    const int cx = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - cw) / 2;
+    const int cy = mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - chh) / 2;
+
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, L"DockPromptWindow", caption,
+                               WS_POPUP | WS_CAPTION | WS_SYSMENU, cx, cy, cw, chh,
+                               owner, nullptr, GetModuleHandleW(nullptr), &st);
+    if (!dlg) return -1;
+
+    CreateWindowExW(0, L"STATIC", hint, WS_CHILD | WS_VISIBLE,
+                    S(18), S(16), S(280), S(20), dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    st.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(defVal).c_str(),
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                              S(18), S(42), S(110), S(26), dlg, nullptr,
+                              GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                    S(210), S(104), S(90), S(30), dlg, reinterpret_cast<HMENU>(1),
+                    GetModuleHandleW(nullptr), nullptr);
+    CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    S(112), S(104), S(90), S(30), dlg, reinterpret_cast<HMENU>(2),
+                    GetModuleHandleW(nullptr), nullptr);
+
+    ShowWindow(dlg, SW_SHOW);
+    SetForegroundWindow(dlg);
+    if (st.edit) SetFocus(st.edit);
+
+    MSG msg{};
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (IsWindow(dlg)) DestroyWindow(dlg);
+    return st.ok ? st.value : -1;
 }
 
 void HandleCommand(int cmd) {
@@ -3801,6 +3989,34 @@ void HandleCommand(int cmd) {
             RefreshPopupIfShown();
             return;
         }
+
+        // 悬停标签：背景黑白 / 不透明度档位 / 自定义
+        if (cmd >= kCmdLabelBgBase && cmd < kCmdLabelBgBase + 2) {
+            s.labelBg = cmd - kCmdLabelBgBase;
+            SaveSettings();
+            RefreshLabelStyle();
+            RefreshPopupIfShown();
+            return;
+        }
+        if (cmd >= kCmdLabelAlphaBase && cmd < kCmdLabelAlphaBase + 6) {
+            static const int pcts[] = { 0, 20, 40, 60, 80, 100 };
+            s.labelAlphaPct = pcts[cmd - kCmdLabelAlphaBase];
+            SaveSettings();
+            RefreshLabelStyle();
+            RefreshPopupIfShown();
+            return;
+        }
+        if (cmd == kCmdLabelAlphaCustom) {
+            const int v = PromptInt(g.hwnd, L"标签不透明度", L"请输入 0 – 100 的整数（%）：",
+                                    s.labelAlphaPct, 0, 100);
+            if (v >= 0) {
+                s.labelAlphaPct = v;
+                SaveSettings();
+                RefreshLabelStyle();
+                RefreshPopupIfShown();
+            }
+            return;
+        }
     }
 
     // 「移除第 N 项」：编号从 100 起，上界卡在档位区之前，避免吞掉 300+ 的命令
@@ -3810,6 +4026,12 @@ void HandleCommand(int cmd) {
     }
     switch (cmd) {
     case kCmdToggle: ToggleVisibility(); break;
+    case kCmdLabelOutline:
+        s.labelOutline = !s.labelOutline;
+        SaveSettings();
+        RefreshLabelStyle();
+        RefreshPopupIfShown();
+        break;
     case kCmdEdgeBottom:
     case kCmdEdgeTop:
     case kCmdEdgeLeft:
