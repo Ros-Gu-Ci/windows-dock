@@ -146,6 +146,11 @@ enum : UINT {
     kCmdShowClock = 70,
     kCmdShowCenter = 71,
     kCmdShowAdd = 72,
+    // 时序 / 边缘留白：档位命令（区间编号，从 300 起，避开 100 起的“移除第 N 项”）
+    kCmdDwellBase = 300,     // 80 / 150 / 300 / 450
+    kCmdRetractBase = 310,   // 300 / 500 / 750 / 1000 / 1250 / 1500
+    kCmdOffsetBase = 320,    // 0 / 8 / 16 / 20 / 24 / 28 / 32 / 36 / 48 / 64
+    kCmdHotEdgeGrow = 330,
     kCmdRemoveBase = 100,
 };
 
@@ -494,9 +499,12 @@ void LoadSettings() {
     if (s.material < 0 || s.material > 3) s.material = 0;
     if (s.iconSize < 28 || s.iconSize > 72) s.iconSize = 44;
     if (s.edge < 0 || s.edge > 3) s.edge = 0;
-    if (s.revealDwellMs < 80 || s.revealDwellMs > 5000) s.revealDwellMs = (int)kRevealDwellMs;
-    if (s.retractMs < 300 || s.retractMs > 20000) s.retractMs = (int)kManualRevealMs;
-    if (s.edgeOffset < 0 || s.edgeOffset > kEdgeOffsetMax) s.edgeOffset = 0;
+    if (s.revealDwellMs < 80) s.revealDwellMs = 80;
+    if (s.revealDwellMs > 5000) s.revealDwellMs = 5000;
+    if (s.retractMs < 300) s.retractMs = 300;
+    if (s.retractMs > 20000) s.retractMs = 20000;
+    if (s.edgeOffset < 0) s.edgeOffset = 0;
+    if (s.edgeOffset > kEdgeOffsetMax) s.edgeOffset = kEdgeOffsetMax;
 }
 
 void SaveSettings() {
@@ -3603,6 +3611,39 @@ HMENU BuildMenu(int itemIndex) {
     AppendMenuW(menu, MF_STRING | (s.edgeReveal ? MF_CHECKED : 0), kCmdEdgeReveal, L"贴边唤出（需停稳）");
     AppendMenuW(menu, MF_STRING | (s.alwaysHide ? MF_CHECKED : 0), kCmdAlwaysHide, L"常隐（只在贴边时出现）");
 
+    // 时序与边缘留白：父项标题直接显示当前生效值，这样 ini 里填的非档位数值也能看见
+    {
+        static const int vals[] = { 80, 150, 300, 450 };
+        HMENU sub = CreatePopupMenu();
+        for (int i = 0; i < ARRAYSIZE(vals); ++i) {
+            AppendMenuW(sub, MF_STRING | (s.revealDwellMs == vals[i] ? MF_CHECKED : 0),
+                        kCmdDwellBase + i, (std::to_wstring(vals[i]) + L" ms").c_str());
+        }
+        const std::wstring title = L"停稳唤出：" + std::to_wstring(s.revealDwellMs) + L" ms";
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
+    }
+    {
+        static const int vals[] = { 300, 500, 750, 1000, 1250, 1500 };
+        HMENU sub = CreatePopupMenu();
+        for (int i = 0; i < ARRAYSIZE(vals); ++i) {
+            AppendMenuW(sub, MF_STRING | (s.retractMs == vals[i] ? MF_CHECKED : 0),
+                        kCmdRetractBase + i, (std::to_wstring(vals[i]) + L" ms").c_str());
+        }
+        const std::wstring title = L"无操作收回：" + std::to_wstring(s.retractMs) + L" ms";
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
+    }
+    {
+        static const int vals[] = { 0, 8, 16, 20, 24, 28, 32, 36, 48, 64 };
+        HMENU sub = CreatePopupMenu();
+        for (int i = 0; i < ARRAYSIZE(vals); ++i) {
+            AppendMenuW(sub, MF_STRING | (s.edgeOffset == vals[i] ? MF_CHECKED : 0),
+                        kCmdOffsetBase + i, (std::to_wstring(vals[i]) + L" px").c_str());
+        }
+        const std::wstring title = L"距屏幕边缘：" + std::to_wstring(s.edgeOffset) + L" px";
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), title.c_str());
+    }
+    AppendMenuW(menu, MF_STRING | (s.hotEdgeGrow ? MF_CHECKED : 0), kCmdHotEdgeGrow, L"触发热区加厚");
+
     HMENU modules = CreatePopupMenu();
     AppendMenuW(modules, MF_STRING | (s.showClock ? MF_CHECKED : 0), kCmdShowClock, L"日期时间");
     AppendMenuW(modules, MF_STRING | (s.showCenter ? MF_CHECKED : 0), kCmdShowCenter, L"九宫格设置");
@@ -3631,6 +3672,37 @@ void HandleCommand(int cmd) {
     if (cmd >= kCmdRemoveBase) {
         RemoveItem(cmd - kCmdRemoveBase);
         return;
+    }
+
+    // 时序 / 边缘留白：档位命令，改完立即生效（不需要重启）
+    {
+        static const int dwellVals[] = { 80, 150, 300, 450 };
+        static const int retractVals[] = { 300, 500, 750, 1000, 1250, 1500 };
+        static const int offsetVals[] = { 0, 8, 16, 20, 24, 28, 32, 36, 48, 64 };
+
+        if (cmd >= kCmdDwellBase && cmd < kCmdDwellBase + ARRAYSIZE(dwellVals)) {
+            s.revealDwellMs = dwellVals[cmd - kCmdDwellBase];
+            SaveSettings();
+            // 热区采样间隔依赖 dwell，重开一次让它重算
+            StopRevealWatch();
+            if (g.autoHidden) StartRevealWatch();
+            RefreshPopupIfShown();
+            return;
+        }
+        if (cmd >= kCmdRetractBase && cmd < kCmdRetractBase + ARRAYSIZE(retractVals)) {
+            s.retractMs = retractVals[cmd - kCmdRetractBase];
+            SaveSettings();
+            RefreshPopupIfShown();
+            return;
+        }
+        if (cmd >= kCmdOffsetBase && cmd < kCmdOffsetBase + ARRAYSIZE(offsetVals)) {
+            s.edgeOffset = offsetVals[cmd - kCmdOffsetBase];
+            SaveSettings();
+            PositionDock();      // 立即重排到位
+            Render();
+            RefreshPopupIfShown();
+            return;
+        }
     }
     switch (cmd) {
     case kCmdToggle: ToggleVisibility(); break;
@@ -3708,6 +3780,11 @@ void HandleCommand(int cmd) {
         g.hoverRevealed = false;
         ClearRevealDeadline();
         UpdateSmartHide();
+        RefreshPopupIfShown();
+        break;
+    case kCmdHotEdgeGrow:
+        s.hotEdgeGrow = !s.hotEdgeGrow;
+        SaveSettings();
         RefreshPopupIfShown();
         break;
     case kCmdHideFullscreen:
