@@ -118,7 +118,7 @@ constexpr float kPopupShadow = 14.0f;
 
 constexpr float kHoverScale = 1.28f;
 constexpr float kSpringK = 170.0f;
-constexpr float kSpringD = 21.0f;
+constexpr float kSpringD = 18.0f;      // 原 21：略降，回弹带一点弹性（阻尼比约 0.69）
 
 enum : UINT {
     kCmdToggle = 1,
@@ -1481,7 +1481,9 @@ void Render() {
 
         const float half = (cell.right - cell.left) * 0.5f * scale;
         // 悬停放大时朝屏幕内侧轻微抬起，接近 Nexus / macOS 的"浮起"手感
-        const float liftPx = (scale - 1.0f) * static_cast<float>(IconBox()) * 0.35f;
+        // 位移强度：下沉（scale<1）时用更大的系数让按下去更明显；悬停放大保持原来的手感
+        const float dev = scale - 1.0f;
+        const float liftPx = dev * static_cast<float>(IconBox()) * (dev < 0.0f ? 0.85f : 0.35f);
         const float dxLift = (s.edge == 2) ? liftPx : ((s.edge == 3) ? -liftPx : 0.0f);
         const float dyLift = (s.edge == 0) ? -liftPx : ((s.edge == 1) ? liftPx : 0.0f);
         const D2D1_RECT_F dst = D2D1::RectF(cx - half + dxLift, cy - half + dyLift,
@@ -3309,7 +3311,7 @@ void LaunchItem(int index) {
 
     // 启动反馈：给该图标一个向下冲量，弹簧自动回弹
     if (index < static_cast<int>(g.anims.size())) {
-        g.anims[static_cast<size_t>(index)].vel -= 3.2f;
+        g.anims[static_cast<size_t>(index)].vel = -7.0f;   // 原 -3.2：缩小到约 81%，明显得多
         StartAnimTimer();
     }
 }
@@ -4497,6 +4499,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.pressPt.x = GET_X_LPARAM(lp);
             g.pressPt.y = GET_Y_LPARAM(lp);
             SetCapture(hwnd);
+            // 按下即时反馈：先轻轻一沉；松手后若启动成功，LaunchItem 会再给一次更深的冲量
+            if (idx < static_cast<int>(g.anims.size())) {
+                g.anims[static_cast<size_t>(idx)].vel = -3.6f;
+                StartAnimTimer();
+            }
         }
         return 0;
     }
