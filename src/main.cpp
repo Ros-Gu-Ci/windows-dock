@@ -221,6 +221,7 @@ struct Settings {
 struct ItemAnim {
     float scale = 1.0f;
     float vel = 0.0f;
+    bool  pressed = false;   // 鼠标按住其间保持下沉，松手再回弹（只此一次，不会有第二次弹跳）
 };
 
 struct DockState {
@@ -3236,9 +3237,11 @@ bool StepAnimation() {
         ItemAnim& a = g.anims[i];
         const int idx = static_cast<int>(i);
 
-        // 鱼眼：悬停项放大 1.16，左右相邻项轻微跟随，形成连续起伏
+        // 按住时压在 0.88 并保持住；松开后自然回弹。优先级高于悬停鱼眼。
         float target = 1.0f;
-        if (g.hover >= 0) {
+        if (a.pressed) {
+            target = 0.88f;
+        } else if (g.hover >= 0) {
             const int d = std::abs(idx - g.hover);
             const float falloff = (d == 0) ? 1.0f : (d == 1 ? 0.22f : (d == 2 ? 0.06f : 0.0f));
             target = 1.0f + (kHoverScale - 1.0f) * falloff;
@@ -3308,12 +3311,7 @@ void LaunchItem(int index) {
         return;
     }
     if (sei.hProcess) CloseHandle(sei.hProcess);
-
-    // 启动反馈：给该图标一个向下冲量，弹簧自动回弹
-    if (index < static_cast<int>(g.anims.size())) {
-        g.anims[static_cast<size_t>(index)].vel = -7.0f;   // 原 -3.2：缩小到约 81%，明显得多
-        StartAnimTimer();
-    }
+    // 启动成功后不再追加反馈：按下时的下沉/松手回弹已经覆盖，避免连弹两次
 }
 
 // ------------------------------------------------------------------- items ---
@@ -4499,9 +4497,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.pressPt.x = GET_X_LPARAM(lp);
             g.pressPt.y = GET_Y_LPARAM(lp);
             SetCapture(hwnd);
-            // 按下即时反馈：先轻轻一沉；松手后若启动成功，LaunchItem 会再给一次更深的冲量
+            // 按下即下沉：置标记后由弹簧把 scale 压到 0.88，按住期间一直保持
             if (idx < static_cast<int>(g.anims.size())) {
-                g.anims[static_cast<size_t>(idx)].vel = -3.6f;
+                g.anims[static_cast<size_t>(idx)].pressed = true;
                 StartAnimTimer();
             }
         }
@@ -4513,6 +4511,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.pressIndex >= 0) {
             g.suppressClick = true;
             if (g.dragging) SaveItems();
+            if (g.pressIndex < static_cast<int>(g.anims.size())) {
+                g.anims[static_cast<size_t>(g.pressIndex)].pressed = false;
+                StartAnimTimer();
+            }
         }
         g.pressIndex = -1;
         g.dragging = false;
@@ -4540,6 +4542,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.pressIndex = -1;
             g.dragging = false;
             if (GetCapture() == hwnd) ReleaseCapture();
+            // 松手：解除下沉，弹簧自然弹回。无论后面是启动还是拖动排序都适用
+            if (pressed >= 0 && pressed < static_cast<int>(g.anims.size())) {
+                g.anims[static_cast<size_t>(pressed)].pressed = false;
+                StartAnimTimer();
+            }
 
             if (dragged) {
                 SaveItems();     // 排序结果落盘
